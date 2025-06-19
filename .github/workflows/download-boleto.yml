@@ -1,0 +1,88 @@
+name: Download Boleto Automaticamente
+
+on:
+  workflow_dispatch:
+    inputs:
+      boleto_url:
+        description: 'URL do boleto para baixar'
+        required: true
+        type: string
+
+jobs:
+  download-boleto:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+    
+    - name: Instalar Puppeteer
+      run: |
+        npm init -y
+        npm install puppeteer
+        
+    - name: Criar pasta downloads
+      run: mkdir -p downloads
+        
+    - name: Baixar boleto
+      run: |
+        cat > download.js << 'EOF'
+        const puppeteer = require('puppeteer');
+        const fs = require('fs');
+        const path = require('path');
+        
+        (async () => {
+          const boletoUrl = process.argv[2];
+          console.log('Baixando boleto de:', boletoUrl);
+          
+          const browser = await puppeteer.launch({
+            headless: 'new',
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+          });
+          
+          const page = await browser.newPage();
+          
+          // Configurar download
+          const downloadPath = path.resolve('./downloads');
+          const client = await page.target().createCDPSession();
+          await client.send('Page.setDownloadBehavior', {
+            behavior: 'allow',
+            downloadPath: downloadPath
+          });
+          
+          // Acessar URL
+          await page.goto(boletoUrl, {
+            waitUntil: 'networkidle0',
+            timeout: 60000
+          });
+          
+          // Aguardar download
+          await page.waitForTimeout(10000);
+          
+          // Se não baixou, capturar como PDF
+          const pdf = await page.pdf({ format: 'A4', printBackground: true });
+          const fileName = `boleto_${Date.now()}.pdf`;
+          fs.writeFileSync(path.join(downloadPath, fileName), pdf);
+          
+          console.log('Boleto salvo como:', fileName);
+          
+          await browser.close();
+        })();
+        EOF
+        
+        node download.js "${{ github.event.inputs.boleto_url }}"
+        
+    - name: Listar arquivos
+      run: ls -la downloads/
+        
+    - name: Upload do boleto
+      uses: actions/upload-artifact@v4
+      with:
+        name: boleto-${{ github.run_id }}
+        path: downloads/
+        retention-days: 30
