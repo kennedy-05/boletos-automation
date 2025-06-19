@@ -36,53 +36,150 @@ jobs:
         const fs = require('fs');
         const path = require('path');
         
+        async function sleep(ms) {
+          return new Promise(resolve => setTimeout(resolve, ms));
+        }
+        
         (async () => {
           const boletoUrl = process.argv[2];
           console.log('Baixando boleto de:', boletoUrl);
           
           const browser = await puppeteer.launch({
             headless: 'new',
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
           });
           
-          const page = await browser.newPage();
-          
-          // Configurar download
-          const downloadPath = path.resolve('./downloads');
-          const client = await page.target().createCDPSession();
-          await client.send('Page.setDownloadBehavior', {
-            behavior: 'allow',
-            downloadPath: downloadPath
-          });
-          
-          // Acessar URL
-          await page.goto(boletoUrl, {
-            waitUntil: 'networkidle0',
-            timeout: 60000
-          });
-          
-          // Aguardar download
-          await page.waitForTimeout(10000);
-          
-          // Se não baixou, capturar como PDF
-          const pdf = await page.pdf({ format: 'A4', printBackground: true });
-          const fileName = `boleto_${Date.now()}.pdf`;
-          fs.writeFileSync(path.join(downloadPath, fileName), pdf);
-          
-          console.log('Boleto salvo como:', fileName);
-          
-          await browser.close();
+          try {
+            const page = await browser.newPage();
+            await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+            
+            // Configurar download
+            const downloadPath = path.resolve('./downloads');
+            const client = await page.target().createCDPSession();
+            await client.send('Page.setDownloadBehavior', {
+              behavior: 'allow',
+              downloadPath: downloadPath
+            });
+            
+            // Adicionar listeners para monitorar navegação
+            page.on('response', response => {
+              const url = response.url();
+              const contentType = response.headers()['content-type'] || '';
+              console.log(`Resposta de ${url}: ${response.status()} - ${contentType}`);
+              
+              if (contentType.includes('application/pdf')) {
+                console.log('PDF detectado na resposta!');
+              }
+            });
+            
+            // Acessar URL
+            console.log('Acessando URL...');
+            const response = await page.goto(boletoUrl, {
+              waitUntil: 'networkidle0',
+              timeout: 60000
+            });
+            
+            console.log('Status da resposta:', response.status());
+            console.log('URL final:', page.url());
+            
+            // Aguardar download usando setTimeout
+            console.log('Aguardando possível download automático...');
+            await sleep(10000);
+            
+            // Tentar encontrar e clicar em botões de download
+            const selectors = [
+              'a[href*=".pdf"]',
+              'a[download]',
+              'button:contains("Download")',
+              'a:contains("Baixar")',
+              'a:contains("PDF")',
+              'button:contains("Visualizar")',
+              '[class*="download"]'
+            ];
+            
+            for (const selector of selectors) {
+              try {
+                const element = await page.$(selector);
+                if (element) {
+                  console.log(`Encontrado elemento: ${selector}`);
+                  await element.click();
+                  await sleep(5000);
+                  break;
+                }
+              } catch (e) {
+                // Continuar tentando outros seletores
+              }
+            }
+            
+            // Verificar se baixou algum PDF
+            let pdfFiles = [];
+            if (fs.existsSync(downloadPath)) {
+              const files = fs.readdirSync(downloadPath);
+              pdfFiles = files.filter(f => f.endsWith('.pdf'));
+              console.log('Arquivos encontrados:', files);
+            }
+            
+            if (pdfFiles.length === 0) {
+              // Última tentativa: capturar a página como PDF
+              console.log('Nenhum PDF baixado. Capturando página como PDF...');
+              
+              // Aguardar um pouco mais para garantir que a página carregou completamente
+              await sleep(3000);
+              
+              const pdf = await page.pdf({ 
+                format: 'A4', 
+                printBackground: true,
+                preferCSSPageSize: false,
+                margin: {
+                  top: '10mm',
+                  right: '10mm',
+                  bottom: '10mm',
+                  left: '10mm'
+                }
+              });
+              
+              const fileName = 'boleto_capturado_' + Date.now() + '.pdf';
+              fs.writeFileSync(path.join(downloadPath, fileName), pdf);
+              console.log('PDF capturado e salvo como:', fileName);
+              
+              // Salvar também um screenshot para debug
+              await page.screenshot({
+                path: path.join(downloadPath, 'screenshot.png'),
+                fullPage: true
+              });
+              console.log('Screenshot salvo para análise');
+              
+            } else {
+              console.log('Boleto baixado com sucesso:', pdfFiles[0]);
+            }
+            
+          } catch (error) {
+            console.error('Erro durante o processo:', error);
+            throw error;
+          } finally {
+            await browser.close();
+          }
         })();
         EOF
         
         node download.js "${{ github.event.inputs.boleto_url }}"
         
-    - name: Listar arquivos
-      run: ls -la downloads/
+    - name: Listar arquivos baixados
+      run: |
+        echo "=== Conteúdo da pasta downloads ==="
+        if [ -d downloads ]; then
+          ls -la downloads/
+          echo ""
+          echo "=== Detalhes dos arquivos PDF ==="
+          find downloads -name "*.pdf" -exec file {} \;
+        else
+          echo "Pasta downloads não encontrada!"
+        fi
         
-    - name: Upload do boleto
+    - name: Upload dos arquivos
       uses: actions/upload-artifact@v4
       with:
         name: boleto-${{ github.run_id }}
         path: downloads/
         retention-days: 30
+        if-no-files-found: warn
